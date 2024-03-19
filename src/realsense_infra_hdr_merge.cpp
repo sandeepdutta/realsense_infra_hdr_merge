@@ -90,11 +90,13 @@ namespace rshdr {
     int seqId = getSeqIDFromMetadataMsg(camera_metadata); // seq_id
     int seqSize  = getSeqSizeFromMetadataMsg(camera_metadata);  // total number in sequence
 
-    if (seqId == -1 || seqSize == -1) return;
-    RCLCPP_DEBUG(this->get_logger(), "Received synchronized Image, CameraInfo, and CameraMetadata messages %d", seqId);
-    // Save image in vector
+    if (seqId == -1 || seqSize == -1) return;    // Save image in vector
+    if (seqId != prevSeqId_) {
+      prevSeqId_ = seqId;
+      inQueue_++;
+    }
     images_[seqId] = cv_bridge::toCvCopy(image)->image;
-    inQueue_++;
+    RCLCPP_DEBUG(this->get_logger(), "Received synchronized Image, CameraInfo, and CameraMetadata messages %d, (%dx%d)", seqId, images_[seqId].cols, images_[seqId].rows);
     // If all images are received, merge them
     if (inQueue_ == seqSize) {
       // Get the start time
