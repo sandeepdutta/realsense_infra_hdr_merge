@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/photo.hpp>
+#include <deque>
 #include <vector>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/highgui/highgui.hpp>
@@ -29,7 +30,8 @@ public:
 private:
     int getSeqIDFromMetadataMsg(const realsense2_camera_msgs::msg::Metadata::ConstSharedPtr & metadata);
     int getSeqSizeFromMetadataMsg(const realsense2_camera_msgs::msg::Metadata::ConstSharedPtr & metadata);
-
+    bool hdrMergeInfra(cv::Mat &fusionNorm);
+    bool temporalFilter(cv::Mat& filtered_frame);
     void callback(const sensor_msgs::msg::Image::ConstSharedPtr& image,
                   const sensor_msgs::msg::CameraInfo::ConstSharedPtr& camera_info,
                   const realsense2_camera_msgs::msg::Metadata::ConstSharedPtr& camera_metadata);
@@ -39,6 +41,7 @@ private:
   std::shared_ptr<message_filters::Subscriber<realsense2_camera_msgs::msg::Metadata>> metadata_sub_;
   std::shared_ptr<Synchronizer<ExactSyncPolicy>> sync_;
   std::vector<cv::Mat> images_;
+  std::deque<cv::Mat> frame_buffer_;
   cv::Ptr<cv::MergeMertens> mergeMertens_;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr ci_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr im_publisher_;
@@ -48,6 +51,9 @@ private:
   float saturationW_  {1.0};
   float exposureW_    {1.0};
   float contrastW_    {1.0};
+  bool mergeDepth_    {false};
+  int temporalFilterThreshold_ {100};
+  unsigned int temporalFilterFrames_   {8};
 };
 
 } 

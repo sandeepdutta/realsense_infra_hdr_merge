@@ -10,6 +10,10 @@ namespace rshdr {
     saturationW_ = this->declare_parameter("saturation_weight",1.0f);
     exposureW_ = this->declare_parameter("exposure_weight",1.0f);
     contrastW_ = this->declare_parameter("contrast_weight",1.0f);
+    mergeDepth_ = this->declare_parameter("merge_depth",false);
+    temporalFilterThreshold_ = this->declare_parameter("temporal_filter_threshold",100);
+    temporalFilterFrames_ = this->declare_parameter("temporal_filter_frames",8);
+
     // Create subscribers
     image_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>(this, "~/camera/image");
     info_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::CameraInfo>>(this, "~/camera/info");
@@ -27,8 +31,8 @@ namespace rshdr {
     // Create publishers
     ci_publisher_ = this->create_publisher<sensor_msgs::msg::CameraInfo>("~/camera/camera_info", 2);
     im_publisher_ = this->create_publisher<sensor_msgs::msg::Image>("~/camera/image_hdr_merge", 2);
-    RCLCPP_INFO(this->get_logger(),"Initialized & subscribed Contrast Weight %f, Saturation Weight %f, Exposure Weight %f",
-                                      contrastW_,saturationW_, exposureW_);
+    RCLCPP_INFO(this->get_logger(),"Initialized & subscribed Contrast Weight %f, Saturation Weight %f, Exposure Weight %f, Temporal Filter Threshold %d",
+                                      contrastW_,saturationW_, exposureW_, temporalFilterThreshold_);
     images_.resize(2);  
   }
 
@@ -82,6 +86,69 @@ namespace rshdr {
     return sequence_size;
   }
 
+  // use MergeMertens to merge images and publish
+  bool realsenseInfraHdrMerge::hdrMergeInfra(cv::Mat &fusionNorm) 
+  {
+    cv::Mat fusion;
+    mergeMertens_->process(images_, fusion);      // merge images
+    fusion.convertTo(fusionNorm, CV_8UC1, 255.0); // normalize
+    return true;
+  }
+
+bool realsenseInfraHdrMerge::temporalFilter(cv::Mat& filtered_frame) {
+
+    // Check if the input frames are of type CV_16U
+    for (const auto& frame : images_) {
+        if (frame.type() != CV_16U) {
+            std::cerr << "Error: Input frames must be of type CV_16U." << std::endl;
+            return false;
+        }
+    }
+
+    // Convert the new frames to float for accurate averaging and add them to the buffer
+    for (const auto& frame : images_) {
+        cv::Mat frame_float;
+        frame.convertTo(frame_float, CV_32F);
+        frame_buffer_.push_back(frame_float);
+    }
+    // frame buffer size not reached yet
+    if (frame_buffer_.size() < temporalFilterFrames_) {
+        return false;
+    }
+
+    // Remove the oldest frames if the buffer exceeds the number of frames
+    while (frame_buffer_.size() > temporalFilterFrames_) {
+        frame_buffer_.pop_front();
+    }
+
+    // Initialize the accumulator for the average
+    cv::Mat avg_frame = cv::Mat::zeros(images_[0].size(), CV_32F);
+
+    // Create a mask to track valid pixels across all frames
+    cv::Mat valid_mask = cv::Mat::ones(images_[0].size(), CV_8U); // Start with all pixels valid
+  
+    // Update the mask based on the threshold
+    for (const auto& frame : frame_buffer_) {
+        cv::Mat current_mask;
+        cv::compare(frame, temporalFilterThreshold_, current_mask, cv::CMP_GT);
+        valid_mask &= current_mask;
+    }
+
+    cv::Mat valid_mask_float ;
+    valid_mask.convertTo(valid_mask_float, CV_32F);
+
+    // Accumulate the valid frames
+    for (const auto& frame : frame_buffer_) {
+        avg_frame += frame.mul(valid_mask_float);
+    }
+    avg_frame /= temporalFilterFrames_;
+    
+    // Convert the result back to 16-bit unsigned integer
+    avg_frame.convertTo(filtered_frame, CV_16U);
+
+    return true;
+}
+
   // The call back function 
   void realsenseInfraHdrMerge::callback(const sensor_msgs::msg::Image::ConstSharedPtr& image,
                 const sensor_msgs::msg::CameraInfo::ConstSharedPtr& camera_info,
@@ -99,15 +166,33 @@ namespace rshdr {
     RCLCPP_DEBUG(this->get_logger(), "Received synchronized Image, CameraInfo, and CameraMetadata messages %d, (%dx%d)", seqId, images_[seqId].cols, images_[seqId].rows);
     // If all images are received, merge them
     if (inQueue_ == seqSize) {
+      bool merged = false;
       // Get the start time
       auto start_time = this->get_clock()->now();
-
+      cv::Mat fused ;
+      if (mergeDepth_) {
+        merged = temporalFilter(fused);
+      } else {
+        merged = hdrMergeInfra(fused);
+      }
+      if (merged) {
+        sensor_msgs::msg::Image::ConstSharedPtr imbridge;
+        if (mergeDepth_) {
+          imbridge = cv_bridge::CvImage(image->header,sensor_msgs::image_encodings::MONO16, fused).toImageMsg();
+        } else {
+          imbridge = cv_bridge::CvImage(image->header,sensor_msgs::image_encodings::MONO8, fused).toImageMsg();
+        }
+        ci_publisher_->publish(*camera_info);
+        im_publisher_->publish(*imbridge);
+      }
+      /*
       cv::Mat fusion, fusionNorm;
       mergeMertens_->process(images_, fusion);      // merge images
       fusion.convertTo(fusionNorm, CV_8UC1, 255.0); // normalize
-      auto imbridge = cv_bridge::CvImage(image->header, sensor_msgs::image_encodings::MONO8, fusionNorm).toImageMsg();
+      auto imbridge = cv_bridge::CvImage( sensor_msgs::image_encodings::MONO8, fusionNorm).toImageMsg();
       ci_publisher_->publish(*camera_info);
       im_publisher_->publish(*imbridge);
+      */
       // Get the end time
       auto end_time = this->get_clock()->now();
       auto duration = end_time - start_time;
